@@ -235,6 +235,36 @@ body {
 .btn--ghost {
   background: transparent;
 }
+.btn--big {
+  padding: 14px 22px;
+  font-size: 1.02rem;
+}
+.btn--sm {
+  padding: 6px 12px;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Combined "everything in one file" call-to-action */
+.combined {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: linear-gradient(135deg, #f5f3ff, #fdf4ff);
+  border: 1px solid #e9d5ff;
+  border-radius: 14px;
+  padding: 18px;
+}
+.combined .progress {
+  gap: 8px;
+}
+.success-text {
+  color: var(--good);
+  font-weight: 600;
+  margin: 0;
+}
 
 /* Status / spinner */
 .status {

@@ -38,3 +38,81 @@ export async function downloadImagesZip(
 export function baseName(filename: string): string {
   return filename.replace(/\.[^./\\]+$/, '') || filename;
 }
+
+/** A streaming destination for text chunks. */
+export interface FileSink {
+  write: (chunk: string) => Promise<void>;
+  close: () => Promise<void>;
+  abort: () => Promise<void>;
+}
+
+interface WritableLike {
+  write: (data: string) => Promise<void>;
+  close: () => Promise<void>;
+  abort?: () => Promise<void>;
+}
+interface SaveFilePickerWindow {
+  showSaveFilePicker?: (opts: {
+    suggestedName?: string;
+    types?: { description?: string; accept: Record<string, string[]> }[];
+  }) => Promise<{ createWritable: () => Promise<WritableLike> }>;
+}
+
+/** True when the browser can stream a download straight to disk. */
+export function canStreamToDisk(): boolean {
+  return typeof (window as SaveFilePickerWindow).showSaveFilePicker === 'function';
+}
+
+/**
+ * Open a destination for a (potentially huge) HTML file.
+ *
+ * Prefers the File System Access API so the document streams to disk and never
+ * has to fit in memory — essential for hundreds of image-heavy pages. Returns
+ * `null` if the user cancels the save dialog. Falls back to buffering + a
+ * regular download when the API isn't available.
+ */
+export async function openHtmlFileSink(
+  suggestedName: string,
+): Promise<FileSink | null> {
+  const picker = (window as SaveFilePickerWindow).showSaveFilePicker;
+  if (picker) {
+    let handle;
+    try {
+      handle = await picker({
+        suggestedName,
+        types: [
+          { description: 'Web page', accept: { 'text/html': ['.html'] } },
+        ],
+      });
+    } catch (err) {
+      if ((err as DOMException)?.name === 'AbortError') return null; // cancelled
+      throw err;
+    }
+    const writable = await handle.createWritable();
+    return {
+      write: (c) => writable.write(c),
+      close: () => writable.close(),
+      abort: async () => {
+        try {
+          await writable.abort?.();
+        } catch {
+          /* ignore */
+        }
+      },
+    };
+  }
+
+  // Fallback: accumulate, then download in one go.
+  const parts: string[] = [];
+  return {
+    write: async (c) => {
+      parts.push(c);
+    },
+    close: async () => {
+      downloadBlob(parts.join(''), suggestedName, 'text/html;charset=utf-8');
+    },
+    abort: async () => {
+      parts.length = 0;
+    },
+  };
+}

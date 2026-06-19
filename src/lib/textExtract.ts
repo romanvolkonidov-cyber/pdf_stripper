@@ -13,17 +13,19 @@ export const DEFAULT_FORMAT_OPTIONS: FormatOptions = {
   paragraphDetection: true,
 };
 
-interface Piece {
-  x: number;
-  endX: number;
-  str: string;
-}
-
-interface Line {
+/** One reconstructed line of text with its vertical position on the page. */
+export interface PageLine {
+  /** PDF y-coordinate of the baseline (larger = higher up the page). */
   y: number;
   height: number;
-  pieces: Piece[];
   text: string;
+}
+
+/** A paragraph: consecutive lines not separated by a large vertical gap. */
+export interface Paragraph {
+  /** y of the paragraph's top line — used to order it against images. */
+  topY: number;
+  lines: string[];
 }
 
 function isTextItem(item: unknown): item is TextItem {
@@ -31,38 +33,38 @@ function isTextItem(item: unknown): item is TextItem {
 }
 
 /**
- * Turn one page's raw text items into readable, layout-aware text.
+ * Reconstruct a page's lines from raw glyph runs.
  *
- * PDF has no concept of "lines" or "paragraphs" — it only positions glyph runs
- * at (x, y) coordinates. We reconstruct structure from those positions:
- *   1. group runs that share a baseline into lines,
- *   2. order lines top-to-bottom and runs left-to-right,
- *   3. insert spaces where there's a horizontal gap,
- *   4. insert blank lines where there's a vertical gap (paragraph breaks).
+ * PDF positions glyph runs at (x, y) coordinates with no notion of lines. We
+ * group runs that share a baseline, order them, and insert spaces where there's
+ * a horizontal gap.
  */
-export async function extractPageText(
-  page: PDFPageProxy,
-  opts: FormatOptions,
-): Promise<string> {
+export async function getPageLines(page: PDFPageProxy): Promise<PageLine[]> {
   const content = await page.getTextContent();
-  const lines: Line[] = [];
+
+  interface Piece {
+    x: number;
+    endX: number;
+    str: string;
+  }
+  interface WorkingLine {
+    y: number;
+    height: number;
+    pieces: Piece[];
+  }
+
+  const lines: WorkingLine[] = [];
 
   for (const item of content.items) {
-    if (!isTextItem(item)) continue; // skip marked-content markers
+    if (!isTextItem(item)) continue;
+    if (item.str === '') continue;
     const tr = item.transform as number[]; // [a, b, c, d, e, f]
     const x = tr[4];
     const y = tr[5];
     const height = item.height || Math.hypot(tr[1], tr[3]) || 10;
     const width = item.width || 0;
 
-    if (item.str === '') {
-      // An empty item with hasEOL still tells us a line ended.
-      continue;
-    }
-
-    // Find a recent line sharing roughly the same baseline. Searching only the
-    // last few lines keeps this near-linear even on dense pages.
-    let line: Line | undefined;
+    let line: WorkingLine | undefined;
     const tol = Math.max(height, 4) * 0.5;
     for (let k = lines.length - 1; k >= 0 && k >= lines.length - 6; k--) {
       if (Math.abs(lines[k].y - y) <= tol) {
@@ -71,7 +73,7 @@ export async function extractPageText(
       }
     }
     if (!line) {
-      line = { y, height, pieces: [], text: '' };
+      line = { y, height, pieces: [] };
       lines.push(line);
     } else {
       line.height = Math.max(line.height, height);
@@ -79,9 +81,9 @@ export async function extractPageText(
     line.pieces.push({ x, endX: x + width, str: item.str });
   }
 
-  // PDF y-axis points up, so larger y means higher on the page.
-  lines.sort((a, b) => b.y - a.y);
+  lines.sort((a, b) => b.y - a.y); // top to bottom
 
+  const result: PageLine[] = [];
   for (const line of lines) {
     line.pieces.sort((a, b) => a.x - b.x);
     const spaceW = Math.max(line.height * 0.25, 1);
@@ -90,44 +92,65 @@ export async function extractPageText(
     for (const piece of line.pieces) {
       if (prevEnd !== null) {
         const gap = piece.x - prevEnd;
-        const needsSpace =
-          gap > spaceW && !s.endsWith(' ') && !piece.str.startsWith(' ');
-        if (needsSpace) {
-          // A very wide gap (think table columns) gets a few spaces so the
-          // visual separation survives; ordinary word gaps get one.
+        if (gap > spaceW && !s.endsWith(' ') && !piece.str.startsWith(' ')) {
           s += gap > spaceW * 6 ? '    ' : ' ';
         }
       }
       s += piece.str;
       prevEnd = piece.endX;
     }
-    line.text = s.replace(/[ \t]+$/g, '');
+    const text = s.replace(/[ \t]+$/g, '');
+    if (text.trim() !== '') {
+      result.push({ y: line.y, height: line.height, text });
+    }
   }
+  return result;
+}
 
-  let out = '';
+/** Group ordered lines into paragraphs using vertical spacing. */
+export function groupParagraphs(
+  lines: PageLine[],
+  paragraphDetection: boolean,
+): Paragraph[] {
+  const paras: Paragraph[] = [];
   let prevY: number | null = null;
   let prevH = 0;
   for (const line of lines) {
-    if (line.text.trim() === '') continue;
-    if (prevY !== null) {
-      const gap = prevY - line.y;
-      if (opts.paragraphDetection && gap > prevH * 1.7) {
-        out += '\n\n';
-      } else {
-        out += '\n';
-      }
+    const startNew =
+      prevY === null ||
+      (paragraphDetection && prevY - line.y > prevH * 1.7);
+    if (startNew) {
+      paras.push({ topY: line.y, lines: [line.text] });
+    } else {
+      paras[paras.length - 1].lines.push(line.text);
     }
-    out += line.text;
     prevY = line.y;
     prevH = line.height;
   }
+  return paras;
+}
 
-  if (opts.dehyphenate) {
-    // "exam-\nple" -> "example" (only when the next line starts lowercase, to
-    // avoid eating real hyphens like "well-\nKnown" proper nouns).
-    out = out.replace(/([\p{L}])-\n(\p{Ll})/gu, '$1$2');
-  }
+/** "exam-\nple" -> "example" (only when the next line starts lowercase). */
+export function dehyphenateText(text: string): string {
+  return text.replace(/([\p{L}])-\n(\p{Ll})/gu, '$1$2');
+}
 
+/** Collapse a paragraph's wrapped lines into a single reflowed string. */
+export function reflowParagraph(para: Paragraph, dehyphenate: boolean): string {
+  let t = para.lines.join('\n');
+  if (dehyphenate) t = dehyphenateText(t);
+  return t.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+/** Extract a page's text as a single formatted string (txt/md path). */
+export async function extractPageText(
+  page: PDFPageProxy,
+  opts: FormatOptions,
+): Promise<string> {
+  const lines = await getPageLines(page);
+  const paras = groupParagraphs(lines, opts.paragraphDetection);
+  let out = paras.map((p) => p.lines.join('\n')).join('\n\n');
+  if (opts.dehyphenate) out = dehyphenateText(out);
   return out.trim();
 }
 
@@ -136,11 +159,7 @@ export interface ExtractProgress {
   total: number;
 }
 
-/**
- * Extract every page, reporting progress and yielding to the UI between pages.
- * Returns one string per page so the caller can format (txt / md, page markers)
- * without re-parsing.
- */
+/** Extract every page, reporting progress and yielding to the UI between pages. */
 export async function extractAllPages(
   doc: PDFDocumentProxy,
   opts: FormatOptions,
@@ -155,7 +174,6 @@ export async function extractAllPages(
     try {
       pages.push(await extractPageText(page, opts));
     } finally {
-      // Free the page's parsed content so memory stays flat across a big doc.
       page.cleanup();
     }
     onProgress({ page: p, total });

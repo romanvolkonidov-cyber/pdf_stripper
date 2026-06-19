@@ -2,7 +2,7 @@ import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjsLib } from './pdf';
 
 /** A decoded image as PDF.js hands it to us. Shape varies by source. */
-interface PdfImage {
+export interface PdfImage {
   width: number;
   height: number;
   kind?: number;
@@ -26,7 +26,10 @@ export interface ImageProgress {
 const { OPS, ImageKind } = pdfjsLib;
 
 /** Resolve an image object from the page, with a timeout so we never hang. */
-function getPageImage(page: PDFPageProxy, name: string): Promise<PdfImage | null> {
+export function getPageImage(
+  page: PDFPageProxy,
+  name: string,
+): Promise<PdfImage | null> {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v: PdfImage | null) => {
@@ -46,7 +49,7 @@ function getPageImage(page: PDFPageProxy, name: string): Promise<PdfImage | null
 }
 
 /** Paint a decoded image onto a canvas and return it, or null if unsupported. */
-function imageToCanvas(img: PdfImage): HTMLCanvasElement | null {
+export function imageToCanvas(img: PdfImage): HTMLCanvasElement | null {
   const { width: w, height: h } = img;
   if (!w || !h) return null;
 

@@ -8,11 +8,18 @@ import {
   type FormatOptions,
 } from './lib/textExtract';
 import { extractImages, type ExtractedImage } from './lib/imageExtract';
+import {
+  exportToHtml,
+  DEFAULT_HTML_OPTIONS,
+  type HtmlProgress,
+} from './lib/htmlExport';
 import { assemble, computeStats, type OutputFormat } from './lib/format';
 import {
   baseName,
+  canStreamToDisk,
   downloadImagesZip,
   downloadText,
+  openHtmlFileSink,
 } from './lib/download';
 import { formatBytes, formatDuration, formatNumber } from './lib/util';
 
@@ -53,9 +60,21 @@ export default function App() {
   const [images, setImages] = useState<ExtractedImage[] | null>(null);
   const imgAbortRef = useRef<AbortController | null>(null);
 
+  // Combined HTML (text + images) export state
+  const [htmlBusy, setHtmlBusy] = useState(false);
+  const [htmlProgress, setHtmlProgress] = useState<HtmlProgress>({
+    page: 0,
+    total: 0,
+  });
+  const [htmlMsg, setHtmlMsg] = useState<{ ok: boolean; text: string } | null>(
+    null,
+  );
+  const htmlAbortRef = useRef<AbortController | null>(null);
+
   const cleanupDoc = useCallback(() => {
     abortRef.current?.abort();
     imgAbortRef.current?.abort();
+    htmlAbortRef.current?.abort();
     // Aborts network requests and tears down the worker.
     docRef.current?.loadingTask.destroy().catch(() => {});
     docRef.current = null;
@@ -206,6 +225,47 @@ export default function App() {
     );
   }, [images, meta]);
 
+  const runHtmlExport = useCallback(async () => {
+    const doc = docRef.current;
+    if (!doc || !meta) return;
+
+    setHtmlMsg(null);
+    // Opening the save dialog must happen in the click handler (user gesture).
+    const sink = await openHtmlFileSink(`${baseName(meta.name)}.html`);
+    if (!sink) return; // user cancelled the save dialog
+
+    const controller = new AbortController();
+    htmlAbortRef.current = controller;
+    setHtmlBusy(true);
+    setHtmlProgress({ page: 0, total: doc.numPages });
+    try {
+      await exportToHtml(
+        doc,
+        { ...DEFAULT_HTML_OPTIONS, format: formatOpts, title: meta.name },
+        sink.write,
+        setHtmlProgress,
+        controller.signal,
+      );
+      await sink.close();
+      setHtmlMsg({
+        ok: true,
+        text: 'Saved! Your HTML file with all pages (text + images) is ready.',
+      });
+    } catch (err) {
+      await sink.abort();
+      if ((err as DOMException)?.name !== 'AbortError') {
+        console.error(err);
+        setHtmlMsg({
+          ok: false,
+          text: 'The combined export failed partway through. If the file is enormous, try a desktop browser with more memory.',
+        });
+      }
+    } finally {
+      setHtmlBusy(false);
+      htmlAbortRef.current = null;
+    }
+  }, [meta, formatOpts]);
+
   const pct =
     progress.total > 0 ? Math.round((progress.page / progress.total) * 100) : 0;
   const eta =
@@ -262,10 +322,21 @@ export default function App() {
           </div>
         )}
 
+        {(phase === 'ready' || phase === 'done') && meta && (
+          <CombinedExport
+            numPages={meta.numPages}
+            busy={htmlBusy}
+            progress={htmlProgress}
+            message={htmlMsg}
+            onExport={runHtmlExport}
+            onCancel={() => htmlAbortRef.current?.abort()}
+          />
+        )}
+
         {(phase === 'ready' || phase === 'done' || phase === 'extracting') &&
           meta && (
             <section className="options">
-              <h2 className="section-title">Text options</h2>
+              <h2 className="section-title">Or get just the text</h2>
               <label className="check">
                 <input
                   type="checkbox"
@@ -296,7 +367,11 @@ export default function App() {
               </label>
 
               {phase !== 'extracting' && (
-                <button className="btn btn--primary" onClick={runExtraction}>
+                <button
+                  className="btn btn--primary"
+                  onClick={runExtraction}
+                  disabled={htmlBusy}
+                >
                   {pages ? 'Re-extract text' : 'Extract text'}
                 </button>
               )}
@@ -376,7 +451,11 @@ export default function App() {
             <pre className="preview">
               {assembled.slice(0, PREVIEW_LIMIT)}
               {assembled.length > PREVIEW_LIMIT
-                ? '\n\n… preview truncated — download to get the full text.'
+                ? `\n\n… this is only an on-screen preview of the first ${formatNumber(
+                    PREVIEW_LIMIT,
+                  )} characters. All ${formatNumber(
+                    stats.pagesWithText,
+                  )} pages of text are in the download / copy.`
                 : ''}
             </pre>
 
@@ -402,6 +481,74 @@ export default function App() {
         </p>
       </footer>
     </div>
+  );
+}
+
+interface CombinedExportProps {
+  numPages: number;
+  busy: boolean;
+  progress: HtmlProgress;
+  message: { ok: boolean; text: string } | null;
+  onExport: () => void;
+  onCancel: () => void;
+}
+
+function CombinedExport({
+  numPages,
+  busy,
+  progress,
+  message,
+  onExport,
+  onCancel,
+}: CombinedExportProps) {
+  const pct =
+    progress.total > 0
+      ? Math.round((progress.page / progress.total) * 100)
+      : 0;
+  return (
+    <section className="combined">
+      <h2 className="section-title">Everything in one file</h2>
+      <p className="muted">
+        One HTML file with all {formatNumber(numPages)} pages — text and
+        pictures together, in reading order. Opens in any browser and in Word.
+      </p>
+
+      {!busy && (
+        <button className="btn btn--primary btn--big" onClick={onExport}>
+          Create combined file (text + images)
+        </button>
+      )}
+
+      {busy && (
+        <div className="progress">
+          <div className="progress__bar">
+            <div className="progress__fill" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="progress__row">
+            <span>
+              Building page {formatNumber(progress.page)} of{' '}
+              {formatNumber(progress.total)} · {pct}%
+            </span>
+            <button className="btn btn--ghost btn--sm" onClick={onCancel}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!canStreamToDisk() && !busy && (
+        <p className="muted">
+          Tip: your browser will build this in memory. For a very large PDF,
+          desktop Chrome or Edge handles it best (they save straight to disk).
+        </p>
+      )}
+
+      {message && (
+        <p className={message.ok ? 'success-text' : 'error-text'}>
+          {message.text}
+        </p>
+      )}
+    </section>
   );
 }
 
