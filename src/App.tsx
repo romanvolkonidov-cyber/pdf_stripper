@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { Dropzone } from './components/Dropzone';
-import { loadPdf } from './lib/pdf';
+import { loadPdf, isPasswordError } from './lib/pdf';
 import {
   extractAllPages,
   DEFAULT_FORMAT_OPTIONS,
@@ -95,9 +95,18 @@ export default function App() {
         setPhase('ready');
       } catch (err) {
         console.error(err);
-        setError(
-          'Could not open this PDF. It may be corrupted, password-protected, or not a real PDF.',
-        );
+        const e = err as { name?: string; message?: string };
+        if (isPasswordError(e)) {
+          setError(
+            'This PDF is password-protected. Enter the correct password when prompted, or remove the protection and try again.',
+          );
+        } else {
+          setError(
+            `Couldn’t open this PDF. The file may be damaged, or — for a very large file — your browser may have run out of memory. Technical details: ${
+              e?.message || e?.name || 'unknown error'
+            }`,
+          );
+        }
         setPhase('error');
       }
     },
